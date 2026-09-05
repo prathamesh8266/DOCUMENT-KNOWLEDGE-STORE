@@ -1,0 +1,6 @@
+configs:
+  params:
+    "server.insecure": true
+    # Argo CD must be configured to operate under the /argocd base path, because we will be using /argocd as path in out istio virtualservice
+    "server.basehref": /argocd
+    "server.rootpath": /argocd

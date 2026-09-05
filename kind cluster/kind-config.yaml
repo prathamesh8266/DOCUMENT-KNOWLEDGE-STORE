@@ -1,0 +1,38 @@
+# Four-node kind cluster:
+# - One Kubernetes control-plane node
+# - Three worker nodes for application workloads
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+
+nodes:
+- role: control-plane
+
+  # Expose selected ports from the kind cluster to the local machine.
+  # All external application traffic will enter through the Istio Gateway,
+  # so individual microservices do not need separate host-port mappings.
+  # without this port mappings you will have to do port forwading manually to access things***
+  extraPortMappings:
+
+  # HTTP traffic:
+  # localhost:8080 -> kind node port 30080 -> Istio Gateway
+  #
+  # The Istio Gateway Service must use nodePort 30080 for HTTP.
+  - containerPort: 30080
+    hostPort: 8080
+    listenAddress: "127.0.0.1"
+    protocol: tcp
+
+  # HTTPS traffic:
+  # localhost:8443 -> kind node port 30443 -> Istio Gateway
+  #
+  # The Istio Gateway Service must use nodePort 30443 for HTTPS.
+  - containerPort: 30443
+    hostPort: 8443
+    listenAddress: "127.0.0.1"
+    protocol: tcp
+
+# No port mappings are required because Kubernetes and Istio handle
+# internal communication between services.
+- role: worker
+- role: worker
+- role: worker

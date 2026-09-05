@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: database
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: knowledge-postgres
+  namespace: database
+spec:
+  # One primary and two replicas.
+  instances: 3
+
+  bootstrap:
+    initdb:
+      database: knowledge_platform
+      owner: app_user
+
+  storage:
+    storageClass: standard
+    size: 2Gi
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
