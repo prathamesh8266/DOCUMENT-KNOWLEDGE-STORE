@@ -1,34 +1,101 @@
 # CloudNativePG GitOps deployment
 
-CloudNativePG runs standard PostgreSQL on Kubernetes and manages it through an
-operator. The operator watches `Cluster` custom resources and creates the
-PostgreSQL pods, services, secrets, and persistent volumes described by them.
+This directory contains the declarative CloudNativePG deployment for the
+Document Knowledge Store. Argo CD installs the CloudNativePG operator and then
+creates a three-instance PostgreSQL cluster.
 
-This repository deploys CloudNativePG in two stages:
+CloudNativePG runs standard PostgreSQL. Its operator watches the CloudNativePG
+`Cluster` resource and creates and maintains the PostgreSQL pods, services,
+secrets, failover configuration, and persistent volumes.
 
-1. `cloudnativepg-operator` installs the CloudNativePG operator from its Helm
-   repository.
-2. `knowledge-postgres` deploys the `Cluster` resource stored in this Git
-   repository.
+## Architecture
 
-The resulting flow is:
+The deployment uses Argo CD's app-of-apps pattern:
 
 ```text
-Argo CD Application: cloudnativepg-operator
-    -> CloudNativePG Helm chart
-    -> operator, CRDs, RBAC, and admission webhooks
-
-Argo CD Application: knowledge-postgres
-    -> gitops/cloudnative-postgres/cluster/postgres-cluster.yaml
-    -> CloudNativePG Cluster: knowledge-postgres
-    -> PostgreSQL primary, replicas, services, secrets, and PVCs
+AppProject: databases
+|
+`-- Root Application: databases
+    |
+    |-- Child Application: cloudnativepg-operator
+    |   `-- CloudNativePG Helm chart 0.29.0
+    |       `-- Two operator replicas in cnpg-system
+    |
+    `-- Child Application: knowledge-postgres
+        `-- cluster/postgres-cluster.yaml
+            `-- Three PostgreSQL instances in databases
 ```
+
+The root Application creates and manages the two child Argo CD Applications.
+The child Applications manage the operator and the PostgreSQL cluster. The
+CloudNativePG operator then turns the `knowledge-postgres` Cluster resource into
+the actual database pods and supporting resources.
+
+### Beginner deployment flow
+
+```mermaid
+flowchart TD
+    Git["GitHub repository"]
+    RepoSecret["Repository Secret<br/>allows Argo CD to access Git"]
+    Project["AppProject: databases<br/>defines allowed sources and destinations"]
+    Root["Root Application: databases<br/>reads the applications directory"]
+
+    OperatorApp["Child Application:<br/>cloudnativepg-operator"]
+    ClusterApp["Child Application:<br/>knowledge-postgres"]
+
+    HelmRepo["CloudNativePG Helm repository"]
+    Operator["CloudNativePG operator<br/>two pods in cnpg-system"]
+    CRDs["CloudNativePG CRDs<br/>adds the Cluster resource type"]
+
+    ClusterFile["postgres-cluster.yaml"]
+    ClusterResource["Cluster: knowledge-postgres<br/>desired database configuration"]
+    Reconcile["CloudNativePG reconciliation"]
+
+    Pods["PostgreSQL pods<br/>one primary and two replicas"]
+    Services["PostgreSQL services<br/>read-write and read-only"]
+    Secrets["Generated credentials<br/>Kubernetes Secret"]
+    PVCs["PersistentVolumeClaims<br/>2 GiB per instance"]
+
+    Git --> RepoSecret
+    RepoSecret --> Root
+    Project -. "permits" .-> Root
+    Project -. "permits" .-> OperatorApp
+    Project -. "permits" .-> ClusterApp
+
+    Root -->|"creates and manages"| OperatorApp
+    Root -->|"creates and manages"| ClusterApp
+
+    OperatorApp -->|"installs chart 0.29.0"| HelmRepo
+    HelmRepo --> Operator
+    HelmRepo --> CRDs
+
+    ClusterApp -->|"reads from Git"| ClusterFile
+    ClusterFile --> ClusterResource
+    CRDs -. "defines this resource type" .-> ClusterResource
+
+    Operator --> Reconcile
+    ClusterResource --> Reconcile
+    Reconcile --> Pods
+    Reconcile --> Services
+    Reconcile --> Secrets
+    Reconcile --> PVCs
+```
+
+Read the diagram from top to bottom:
+
+1. The AppProject grants permission; it does not deploy resources itself.
+2. The root Application creates the two child Applications.
+3. The operator Application installs CloudNativePG and its CRDs.
+4. The cluster Application creates the `knowledge-postgres` Cluster resource.
+5. The operator observes that Cluster resource and creates the PostgreSQL
+   runtime resources.
 
 ## Repository layout
 
 ```text
 gitops/
 |-- cloudnative-postgres/
+|   |-- root-application.yaml
 |   |-- applications/
 |   |   |-- cloudnativepg-operator.yaml
 |   |   `-- postgres-cluster-application.yaml
@@ -41,284 +108,379 @@ gitops/
     `-- repository.yaml
 ```
 
-## What is deployed
+No Kustomization is required. The root Application points directly to
+`gitops/cloudnative-postgres/applications`, which contains only child
+Application manifests.
 
-The operator Application deploys:
+## Namespace and project names
 
-- Two CloudNativePG operator replicas in `cnpg-system`.
-- CloudNativePG CustomResourceDefinitions (CRDs).
-- Cluster-level RBAC used by the operator.
-- Mutating and validating admission webhooks.
+The configuration deliberately uses different namespaces for control-plane and
+database workloads:
 
-The cluster Application deploys:
+| Item | Name | Purpose |
+| --- | --- | --- |
+| Argo CD namespace | `argocd` | Stores the root and child Application resources. |
+| Argo CD AppProject | `databases` | Groups the Applications and restricts their permissions. |
+| Operator namespace | `cnpg-system` | Runs the CloudNativePG operator replicas and webhook service. |
+| PostgreSQL namespace | `databases` | Runs the PostgreSQL instances, Services, Secrets, and PVCs. |
 
-- The `database` namespace.
-- A CloudNativePG cluster named `knowledge-postgres`.
-- One PostgreSQL primary and two replicas.
-- A database named `knowledge_platform` owned by `app_user`.
-- A 2 GiB persistent volume for each PostgreSQL instance.
+The AppProject name and PostgreSQL namespace happen to use the same value,
+`databases`, but they are different Kubernetes resources with different roles.
+
+## Current configuration
+
+### Database AppProject
+
+`gitops/projects/database.yaml` creates the `databases` AppProject in `argocd`.
+
+It allows these sources:
+
+- `https://cloudnative-pg.github.io/charts`
+- `https://github.com/prathamesh8266/DOCUMENT-KNOWLEDGE-STORE.git`
+
+It allows these destinations:
+
+- `argocd` for the child Application resources created by the root Application.
+- `cnpg-system` for the CloudNativePG operator.
+- `databases` for the PostgreSQL cluster.
+
+It permits the cluster-scoped resources required by the operator:
+
+- `Namespace`
+- `CustomResourceDefinition`
+- `ClusterRole`
+- `ClusterRoleBinding`
+- `MutatingWebhookConfiguration`
+- `ValidatingWebhookConfiguration`
+
+These entries grant Argo CD permission within this AppProject. They do not
+create those resources by themselves.
+
+### Root Application
+
+`gitops/cloudnative-postgres/root-application.yaml` creates an Application named
+`databases` in `argocd`.
+
+Its source is:
+
+```text
+Repository: https://github.com/prathamesh8266/DOCUMENT-KNOWLEDGE-STORE.git
+Revision:   master
+Path:       gitops/cloudnative-postgres/applications
+```
+
+Every YAML file in that source directory is an Argo CD `Application`, which is
+why this is called the app-of-apps pattern.
+
+### Operator Application
+
+`applications/cloudnativepg-operator.yaml` installs:
+
+```text
+Helm repository: https://cloudnative-pg.github.io/charts
+Chart:           cloudnative-pg
+Chart version:   0.29.0
+Helm release:      cloudnative-pg
+Namespace:       cnpg-system
+Replicas:        2
+```
+
+Operator resources:
+
+```text
+Requests: 100m CPU, 128Mi memory
+Limits:   200m CPU, 256Mi memory
+PodMonitor: disabled
+```
+
+Two replicas provide operator availability. Only one replica holds the leader
+lease and actively reconciles resources; the second is a standby.
+
+### PostgreSQL cluster Application
+
+`applications/postgres-cluster-application.yaml` reads Kubernetes manifests
+from:
+
+```text
+Repository: https://github.com/prathamesh8266/DOCUMENT-KNOWLEDGE-STORE.git
+Revision:   master
+Path:       gitops/cloudnative-postgres/cluster
+Destination namespace: databases
+```
+
+The Application retries an unsuccessful initial synchronization up to ten
+times. `SkipDryRunOnMissingResource=true` lets the cluster Application wait for
+the operator's CRDs during a clean installation.
+
+### PostgreSQL cluster
+
+`cluster/postgres-cluster.yaml` creates:
+
+```text
+Namespace:          databases
+Cluster name:       knowledge-postgres
+Instances:          3 (one primary and two replicas)
+Initial database:   knowledge_platform
+Application owner:  app_user
+StorageClass:       standard
+Storage per pod:    2Gi
+```
+
+Each PostgreSQL instance requests `100m` CPU and `256Mi` memory and is limited
+to `500m` CPU and `512Mi` memory.
 
 ## Prerequisites
 
-Before starting, confirm that the following are available:
+Before deploying, confirm:
 
-- A running Kubernetes cluster.
-- `kubectl` configured for the intended cluster.
-- Argo CD installed in the `argocd` namespace.
-- The repository pushed to GitHub.
-- A default StorageClass named `standard`.
-- The `psql` client if a connection from the local computer is required.
+- The Kind Kubernetes cluster is running.
+- `kubectl` uses the intended cluster context.
+- All Kubernetes nodes are `Ready`.
+- Argo CD is installed in `argocd`.
+- A StorageClass named `standard` exists.
+- The Git repository is reachable from Argo CD.
+- There is no duplicate manually installed CloudNativePG operator.
 
-Check the current context and StorageClass:
+Run:
 
 ```powershell
 kubectl config current-context
 kubectl get nodes
+kubectl get namespace argocd
 kubectl get storageclass
+helm list -n cnpg-system
+kubectl get deployments,pods -n cnpg-system
 ```
 
-For the local Kind environment, the expected context is usually
-`kind-rag-cluster`, and all four nodes should report `Ready`.
+For this local environment, the expected context is `kind-rag-cluster`, all four
+nodes should be `Ready`, and `standard` should be the default StorageClass.
 
-## Required preflight correction
+### Check for an older manual installation
 
-The namespace must be named `database` consistently in all three places:
+There must be only one CloudNativePG operator installation. A manual Helm
+release named `cnpg` and an Argo-managed Deployment named `cloudnative-pg`
+indicate duplicate installations that will compete for the same leader lease.
 
-```yaml
-# gitops/projects/database.yaml
-destinations:
-  - server: https://kubernetes.default.svc
-    namespace: database
-```
-
-```yaml
-# gitops/cloudnative-postgres/applications/postgres-cluster-application.yaml
-destination:
-  server: https://kubernetes.default.svc
-  namespace: database
-```
-
-```yaml
-# gitops/cloudnative-postgres/cluster/postgres-cluster.yaml
-metadata:
-  name: knowledge-postgres
-  namespace: database
-```
-
-Do not use `databases` as the destination namespace. `databases` is not allowed
-by the current AppProject and does not match the namespace in the Cluster
-manifest.
-
-## Before deploying
-
-Argo CD reads the PostgreSQL manifest from the remote `master` branch. Commit
-and push the GitOps files before creating the cluster Application:
-
-```powershell
-git status
-git add gitops/cloudnative-postgres gitops/projects/database.yaml gitops/repository/repository.yaml
-git commit -m "add CloudNativePG GitOps deployment"
-git push origin master
-```
-
-Confirm that an older manually installed CloudNativePG release is not still
-running:
+Check before deployment:
 
 ```powershell
 helm list -n cnpg-system
-kubectl get pods -n cnpg-system
 kubectl get clusters.postgresql.cnpg.io -A
 ```
 
-There should be only one CloudNativePG installation. Two deployments with names
-such as `cnpg-cloudnative-pg` and `cloudnative-pg` indicate that a manual Helm
-installation and an Argo-managed installation are both present. They will
-compete for the same leader-election lease.
-
 If a manual `cnpg` release exists, first confirm that no PostgreSQL Cluster
-resources depend on it. Only then remove the duplicate manual release:
+resources or data depend on it. Only then remove it:
 
 ```powershell
 helm uninstall cnpg -n cnpg-system
 ```
 
-## Step 1: Register the Git repository
+## Deployment
 
-Apply the Argo CD repository Secret:
+### Step 1: Commit and push the desired state
+
+Argo CD reads `master` from GitHub, not uncommitted local files. Commit and push
+all configuration before creating the root Application:
+
+```powershell
+git status
+git add gitops
+git commit -m "configure CloudNativePG GitOps deployment"
+git push origin master
+```
+
+Confirm the expected files exist on the remote branch:
+
+```powershell
+git ls-tree -r origin/master --name-only
+```
+
+The output must include:
+
+```text
+gitops/cloudnative-postgres/root-application.yaml
+gitops/cloudnative-postgres/applications/cloudnativepg-operator.yaml
+gitops/cloudnative-postgres/applications/postgres-cluster-application.yaml
+gitops/cloudnative-postgres/cluster/postgres-cluster.yaml
+gitops/projects/database.yaml
+gitops/repository/repository.yaml
+```
+
+### Step 2: Register the repository
+
+The repository Secret tells Argo CD about the Git repository:
 
 ```powershell
 kubectl apply -f gitops/repository/repository.yaml
-```
-
-Confirm that Argo CD can see the repository configuration:
-
-```powershell
 kubectl get secret document-knowledge-store-repository -n argocd
 ```
 
-The current repository is public, so the Secret only stores the repository URL.
-Do not commit usernames, passwords, personal access tokens, or SSH private keys.
+The repository is currently public, so no username, password, token, or SSH key
+is stored in this Secret. Never commit repository credentials.
 
-## Step 2: Create the database AppProject
+### Step 3: Create or update the AppProject
 
-Apply the AppProject before either Application:
+The AppProject must exist before the root Application because the root refers to
+`project: databases`:
 
 ```powershell
 kubectl apply -f gitops/projects/database.yaml
+kubectl get appproject databases -n argocd
 ```
 
-Verify it:
+Review its effective configuration when troubleshooting permissions:
 
 ```powershell
-kubectl get appproject databases -n argocd
 kubectl describe appproject databases -n argocd
 ```
 
-The AppProject allows the CloudNativePG Helm repository and this Git repository.
-It permits deployments to `cnpg-system` and `database`, plus the cluster-scoped
-resources required by the operator, including CRDs, RBAC, and admission
-webhooks.
+### Step 4: Bootstrap the root Application
 
-## Step 3: Deploy the CloudNativePG operator
-
-Apply the operator Application:
+Apply only the root Application:
 
 ```powershell
-kubectl apply -f gitops/cloudnative-postgres/applications/cloudnativepg-operator.yaml
+kubectl apply -f gitops/cloudnative-postgres/root-application.yaml
 ```
 
-Watch the Argo CD Application until it becomes `Synced` and `Healthy`:
+The standard Argo CD resource finalizer may produce a Kubernetes warning that
+recommends a finalizer name containing a slash. The Application is successfully
+created when the command prints:
 
-```powershell
-kubectl get application cloudnativepg-operator -n argocd -w
+```text
+application.argoproj.io/databases created
 ```
 
-Press `Ctrl+C` after it is healthy, then verify the operator:
+The finalizer is retained so deleting an Application can cascade to the
+resources it manages.
+
+Do not manually apply the two files under `applications/`. The root Application
+creates and manages them from Git.
+
+### Step 5: Watch Argo CD reconciliation
+
+Watch all Applications:
 
 ```powershell
-kubectl get pods -n cnpg-system
-kubectl get deployment -n cnpg-system
+kubectl get applications -n argocd -w
+```
+
+Expected Applications:
+
+```text
+databases
+cloudnativepg-operator
+knowledge-postgres
+```
+
+The desired final state is `Synced` and `Healthy` for all three. Press `Ctrl+C`
+after they are healthy.
+
+For details:
+
+```powershell
+kubectl describe application databases -n argocd
+kubectl describe application cloudnativepg-operator -n argocd
+kubectl describe application knowledge-postgres -n argocd
+```
+
+The operator may become healthy before the PostgreSQL cluster. Initial image
+downloads and database initialization can take several minutes.
+
+## Verification
+
+### Verify the operator
+
+```powershell
+kubectl get deployments,pods,services -n cnpg-system
 kubectl get crd clusters.postgresql.cnpg.io
 kubectl get lease -n cnpg-system
 ```
 
-Two `cloudnative-pg-*` pods are expected because the Application configures
-`replicaCount: 2`. Only one replica holds the leader lease; the other is a
-standby. This is normal.
+Expected operator state:
 
-Do not continue until the operator Application is healthy and the
-`clusters.postgresql.cnpg.io` CRD exists.
+- One `cloudnative-pg` Deployment.
+- Two ready `cloudnative-pg-*` pods.
+- The CloudNativePG CRDs exist.
+- One operator pod holds the leader lease.
 
-## Step 4: Deploy the PostgreSQL cluster
-
-Apply the cluster Application:
+### Verify PostgreSQL
 
 ```powershell
-kubectl apply -f gitops/cloudnative-postgres/applications/postgres-cluster-application.yaml
+kubectl get cluster knowledge-postgres -n databases
+kubectl get pods -n databases -o wide
+kubectl get services -n databases
+kubectl get pvc -n databases
+kubectl get secrets -n databases
+kubectl get events -n databases --sort-by=.lastTimestamp
 ```
 
-This Application reads the following path from the remote repository:
+Expected database state:
 
-```text
-gitops/cloudnative-postgres/cluster
-```
-
-Watch the Argo CD Application:
-
-```powershell
-kubectl get application knowledge-postgres -n argocd -w
-```
-
-Then watch the PostgreSQL cluster become ready:
-
-```powershell
-kubectl get cluster knowledge-postgres -n database -w
-```
-
-Initial image downloads and database initialization can take several minutes.
-Press `Ctrl+C` after the cluster reports ready.
-
-## Step 5: Verify PostgreSQL resources
-
-Run these checks:
-
-```powershell
-kubectl get cluster -n database
-kubectl get pods -n database -o wide
-kubectl get services -n database
-kubectl get pvc -n database
-kubectl get secrets -n database
-```
-
-Expected results:
-
-- The `knowledge-postgres` Cluster reports three instances and a healthy phase.
+- The `knowledge-postgres` Cluster reports a healthy phase.
 - Three PostgreSQL instance pods are running.
-- Each instance has a bound PVC.
+- Each PostgreSQL instance has a bound 2 GiB PVC.
 - `knowledge-postgres-rw` points to the writable primary.
-- `knowledge-postgres-ro` provides read-only access to replicas.
+- `knowledge-postgres-ro` provides read-only replica access.
 - `knowledge-postgres-r` provides access to all instances.
-- `knowledge-postgres-app` contains application connection credentials.
+- `knowledge-postgres-app` contains application credentials.
 
-For more detail:
+For additional status information:
 
 ```powershell
-kubectl describe cluster knowledge-postgres -n database
-kubectl get events -n database --sort-by=.lastTimestamp
+kubectl describe cluster knowledge-postgres -n databases
 ```
 
-## Step 6: Read the generated credentials
+## Database credentials
 
-CloudNativePG creates the application credentials as a Kubernetes Secret. Read
-and decode them in PowerShell without writing them to a file:
+CloudNativePG generates the application credentials in the
+`knowledge-postgres-app` Secret. Decode them in PowerShell without writing them
+to a file:
 
 ```powershell
-$encodedUsername = kubectl get secret knowledge-postgres-app -n database -o jsonpath="{.data.username}"
+$encodedUsername = kubectl get secret knowledge-postgres-app -n databases -o jsonpath="{.data.username}"
 $databaseUsername = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($encodedUsername))
 
-$encodedPassword = kubectl get secret knowledge-postgres-app -n database -o jsonpath="{.data.password}"
+$encodedPassword = kubectl get secret knowledge-postgres-app -n databases -o jsonpath="{.data.password}"
 $databasePassword = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($encodedPassword))
 
 $databaseUsername
 $databasePassword
 ```
 
-Do not place the decoded password in Git, a ConfigMap, application logs, or the
-README.
+Do not put decoded credentials in Git, a ConfigMap, logs, or documentation.
 
-## Step 7: Connect from the local computer
+## Connect from the local computer
 
-Forward the read-write PostgreSQL service to the local computer:
+Start a port-forward to the read-write service:
 
 ```powershell
-kubectl port-forward -n database service/knowledge-postgres-rw 5432:5432
+kubectl port-forward -n databases service/knowledge-postgres-rw 5432:5432
 ```
 
-Keep that terminal running. In another PowerShell terminal, connect with
-`psql`:
+Keep that terminal open. In another terminal with `psql` installed:
 
 ```powershell
-$encodedPassword = kubectl get secret knowledge-postgres-app -n database -o jsonpath="{.data.password}"
+$encodedPassword = kubectl get secret knowledge-postgres-app -n databases -o jsonpath="{.data.password}"
 $env:PGPASSWORD = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($encodedPassword))
 psql --host 127.0.0.1 --port 5432 --username app_user --dbname knowledge_platform
 ```
 
-Inside Kubernetes, application services should use:
+Application services running inside Kubernetes should connect through:
 
 ```text
-Host: knowledge-postgres-rw.database.svc.cluster.local
-Port: 5432
+Host:     knowledge-postgres-rw.databases.svc.cluster.local
+Port:     5432
 Database: knowledge_platform
 Username: app_user
 Password: value from the knowledge-postgres-app Secret
 ```
 
-An application Deployment should consume the Secret directly rather than
+Applications should consume the Kubernetes Secret directly instead of
 hard-coding the password.
 
 ## GitOps behavior
 
-Both Applications enable:
+The root and child Applications enable automated synchronization:
 
 ```yaml
 syncPolicy:
@@ -327,68 +489,106 @@ syncPolicy:
     selfHeal: true
 ```
 
-This means:
+- `selfHeal` restores managed resources that are changed manually.
+- `prune` deletes managed resources that are removed from the source.
+- `ServerSideApply` lets the Kubernetes API server manage field ownership.
+- `CreateNamespace` creates a destination namespace when necessary.
 
-- Argo CD automatically applies changes detected in the configured source.
-- `selfHeal` restores resources changed manually in the cluster.
-- `prune` removes managed resources deleted from the source.
+After the initial bootstrap, changes follow this process:
 
-The Application manifests themselves are currently bootstrap files. No parent
-Application watches their directory, so changes to those files must be applied
-again with `kubectl apply`. Changes to `cluster/postgres-cluster.yaml` are
-automatically detected after they are committed and pushed to `master`.
+1. Edit a manifest in Git.
+2. Commit and push the change to `master`.
+3. Argo CD detects the new commit.
+4. Argo CD synchronizes the affected Application.
+5. CloudNativePG reconciles changes to the PostgreSQL Cluster resource.
 
-## Updating the PostgreSQL cluster
+Do not manually modify operator-managed PostgreSQL Deployments, Pods, Services,
+Secrets, or PVCs. Change `cluster/postgres-cluster.yaml` and let the controllers
+reconcile it.
 
-To change the number of instances, storage, or resource limits:
+## Updating configurations
 
-1. Edit `gitops/cloudnative-postgres/cluster/postgres-cluster.yaml`.
-2. Commit and push the change.
-3. Watch Argo CD synchronize `knowledge-postgres`.
-4. Watch the CloudNativePG Cluster status and events.
+### Update the PostgreSQL cluster
 
-Example checks:
-
-```powershell
-kubectl get application knowledge-postgres -n argocd
-kubectl get cluster knowledge-postgres -n database
-kubectl get pods,pvc -n database
-```
-
-Do not manually edit operator-managed Deployments, Pods, Services, or PVCs.
-Change the CloudNativePG `Cluster` resource and allow the operator to reconcile
-the dependent resources.
-
-## Troubleshooting
-
-### Application destination is not permitted
-
-If Argo CD reports that the destination is not permitted, make sure the
-Application uses namespace `database`, not `databases`, and that the AppProject
-contains the same destination.
-
-### Source path does not exist
-
-If Argo CD reports a manifest-generation or source-path error:
-
-```powershell
-git status
-git log -1 --oneline
-git ls-tree -r origin/master --name-only
-```
-
-Confirm that this path exists in the remote `master` branch:
+Edit:
 
 ```text
 gitops/cloudnative-postgres/cluster/postgres-cluster.yaml
 ```
 
-Local, uncommitted files cannot be read by Argo CD.
+Commit and push, then watch:
+
+```powershell
+kubectl get application knowledge-postgres -n argocd
+kubectl get cluster knowledge-postgres -n databases
+kubectl get pods,pvc -n databases
+```
+
+### Update the operator chart
+
+Change `targetRevision` in:
+
+```text
+gitops/cloudnative-postgres/applications/cloudnativepg-operator.yaml
+```
+
+Because the root Application manages this child Application, committing and
+pushing the change is sufficient. Review CloudNativePG release notes and back up
+important databases before operator upgrades.
+
+### Update the AppProject or repository registration
+
+The root Application does not manage `gitops/projects/database.yaml` or
+`gitops/repository/repository.yaml`. After changing either bootstrap file, apply
+it again:
+
+```powershell
+kubectl apply -f gitops/repository/repository.yaml
+kubectl apply -f gitops/projects/database.yaml
+```
+
+## Troubleshooting
+
+### Root Application is invalid
+
+Check that the `databases` AppProject exists and permits `argocd` as a
+destination:
+
+```powershell
+kubectl get appproject databases -n argocd
+kubectl describe application databases -n argocd
+```
+
+### Child Applications do not appear
+
+Confirm that the root source directory exists in the remote branch:
+
+```powershell
+git ls-tree -r origin/master --name-only
+kubectl describe application databases -n argocd
+```
+
+The remote branch must contain both files under:
+
+```text
+gitops/cloudnative-postgres/applications
+```
+
+### Application destination is not permitted
+
+The values must match exactly:
+
+```text
+Root destination:       argocd
+Operator destination:   cnpg-system
+PostgreSQL destination: databases
+```
+
+All three destinations must be listed in the `databases` AppProject.
 
 ### No matches for kind Cluster
 
-This means the CloudNativePG CRD is not installed or is not ready. Verify the
-operator Application and CRD:
+The CloudNativePG CRD is missing or not ready:
 
 ```powershell
 kubectl get application cloudnativepg-operator -n argocd
@@ -396,19 +596,22 @@ kubectl get crd clusters.postgresql.cnpg.io
 kubectl get pods -n cnpg-system
 ```
 
-### Operator exists but no PostgreSQL pods appear
+The cluster Application is configured to retry and skip its initial dry run
+while the CRD is being installed.
 
-The operator alone does not create a database. Verify that the cluster
-Application and Cluster resource exist:
+### Operator is running but PostgreSQL is absent
+
+The operator does not create a database until the Cluster resource exists:
 
 ```powershell
 kubectl get application knowledge-postgres -n argocd
 kubectl get clusters.postgresql.cnpg.io -A
+kubectl get events -n databases --sort-by=.lastTimestamp
 ```
 
 ### More than two operator pods exist
 
-Check for a duplicate manual Helm installation:
+Check for a duplicate Helm installation:
 
 ```powershell
 helm list -n cnpg-system
@@ -416,25 +619,22 @@ kubectl get deployments,pods -n cnpg-system
 kubectl get lease -n cnpg-system
 ```
 
-The expected Argo-managed Deployment is `cloudnative-pg` with two replicas.
+The expected deployment is `cloudnative-pg` with two replicas.
 
 ### PostgreSQL pods remain Pending
 
-Check PVCs, the StorageClass, node capacity, and recent events:
+Inspect storage and scheduling:
 
 ```powershell
-kubectl get pvc -n database
+kubectl get pvc -n databases
 kubectl get storageclass
-kubectl describe pod -n database
-kubectl get events -n database --sort-by=.lastTimestamp
+kubectl describe pods -n databases
+kubectl get events -n databases --sort-by=.lastTimestamp
 ```
 
-The manifest currently requests the `standard` StorageClass. Change the
-manifest if the target cluster uses a different StorageClass name.
+The current manifest requires the `standard` StorageClass.
 
 ### Admission webhook errors
-
-Verify the operator pods, webhook service, and operator logs:
 
 ```powershell
 kubectl get pods,services -n cnpg-system
@@ -442,12 +642,12 @@ kubectl get validatingwebhookconfiguration,mutatingwebhookconfiguration
 kubectl logs deployment/cloudnative-pg -n cnpg-system --tail=200
 ```
 
-## Important safety notes
+## Safety notes
 
-- Keep database credentials in Kubernetes Secrets.
-- Do not commit decoded passwords.
-- Do not run a manual Helm installation alongside the Argo-managed operator.
-- Review changes carefully because automated pruning is enabled.
-- Deleting an Argo Application with its resource finalizer can delete the
-  resources managed by that Application.
-- Back up PostgreSQL before destructive tests or major configuration changes.
+- Do not commit database or repository credentials.
+- Do not run a manual CloudNativePG Helm release alongside the Argo deployment.
+- Review deletions carefully because automated pruning is enabled.
+- The Application finalizers enable cascading deletion of managed resources.
+- Deleting `knowledge-postgres` can delete database resources and may lead to
+  data loss depending on storage retention settings.
+- Back up important data before destructive tests, upgrades, or major changes.

@@ -25,7 +25,7 @@ helm upgrade argocd argo/argo-cd `
 $encodedPassword = kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}"
 [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($encodedPassword))
 user: admin
-password: uTt2LzWyl29OXpVl
+password: 
 url: http://localhost:8080/argocd
 
 6. 

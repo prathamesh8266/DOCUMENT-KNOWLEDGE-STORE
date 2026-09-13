@@ -24,3 +24,9 @@ service:
       targetPort: 443
       nodePort: 30443
       protocol: TCP
+
+    - name: tcp-postgres
+      port: 5432
+      targetPort: 5432
+      nodePort: 30432
+      protocol: TCP

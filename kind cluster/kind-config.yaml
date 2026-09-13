@@ -31,6 +31,13 @@ nodes:
     listenAddress: "127.0.0.1"
     protocol: tcp
 
+  # PostgreSQL:
+  # localhost:15432 -> kind node port 30432 -> Istio Gateway
+  - containerPort: 30432
+    hostPort: 15432
+    listenAddress: "127.0.0.1"
+    protocol: tcp
+
 # No port mappings are required because Kubernetes and Istio handle
 # internal communication between services.
 - role: worker
