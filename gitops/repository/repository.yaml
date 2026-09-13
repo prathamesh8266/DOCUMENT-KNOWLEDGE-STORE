@@ -1,0 +1,13 @@
+# Argo CD does not define a Repository custom resource. Its repository configuration is intentionally represented 
+# by a standard Kubernetes Secret carrying this label "argocd.argoproj.io/secret-type: repository"
+stringData:
+apiVersion: v1
+kind: Secret
+metadata:
+  name: document-knowledge-store-repository
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: git
+  url: https://github.com/prathamesh8266/DOCUMENT-KNOWLEDGE-STORE.git

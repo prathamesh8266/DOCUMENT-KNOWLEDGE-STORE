@@ -26,5 +26,6 @@ $encodedPassword = kubectl -n argocd get secret argocd-initial-admin-secret -o j
 [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($encodedPassword))
 user: admin
 password: uTt2LzWyl29OXpVl
+url: http://localhost:8080/argocd
 
 6. 

@@ -1,0 +1,33 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: knowledge-postgres
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: databases
+
+  source:
+    repoURL: https://github.com/prathamesh8266/DOCUMENT-KNOWLEDGE-STORE.git
+    targetRevision: master
+    path: gitops/cloudnative-postgres/cluster
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: databases
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true

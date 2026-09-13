@@ -1,0 +1,21 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: document-knowledge-store
+  namespace: argocd
+spec:
+  description: GitOps project for the Document Knowledge Store platform
+
+  sourceRepos:
+    - https://github.com/prathamesh8266/DOCUMENT-KNOWLEDGE-STORE.git
+
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: default
+
+    # SeaweedFS object storage
+    - server: https://kubernetes.default.svc
+      namespace: document-store-storage
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
