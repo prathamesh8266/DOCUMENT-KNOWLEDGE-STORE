@@ -1,0 +1,18 @@
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: postgres
+  namespace: default
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - rag-gateway
+  tcp:
+    - match:
+        - port: 5432
+      route:
+        - destination:
+            host: knowledge-postgres-rw.databases.svc.cluster.local
+            port:
+              number: 5432
