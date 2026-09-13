@@ -21,7 +21,7 @@ spec:
       namespace: cnpg-system
 
     - server: https://kubernetes.default.svc
-      namespace: database
+      namespace: databases
 
   clusterResourceWhitelist:
     - group: ""

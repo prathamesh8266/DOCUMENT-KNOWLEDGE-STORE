@@ -1,6 +1,5 @@
 # Argo CD does not define a Repository custom resource. Its repository configuration is intentionally represented 
 # by a standard Kubernetes Secret carrying this label "argocd.argoproj.io/secret-type: repository"
-stringData:
 apiVersion: v1
 kind: Secret
 metadata:
